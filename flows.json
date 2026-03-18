@@ -1,0 +1,498 @@
+[
+    {
+        "id": "a0925a7f407eb939",
+        "type": "tab",
+        "label": "Mail",
+        "disabled": false,
+        "info": "",
+        "env": []
+    },
+    {
+        "id": "51d9c82aa1c64989",
+        "type": "e-mail in",
+        "z": "a0925a7f407eb939",
+        "name": "rtteixeira1",
+        "protocol": "IMAP",
+        "server": "imap.gmail.com",
+        "useSSL": true,
+        "autotls": "always",
+        "port": "993",
+        "authtype": "BASIC",
+        "saslformat": true,
+        "token": "oauth2Response.access_token",
+        "box": "Inbox",
+        "disposition": "Read",
+        "criteria": "UNSEEN",
+        "repeat": "900",
+        "fetch": "auto",
+        "inputs": 0,
+        "x": 160,
+        "y": 400,
+        "wires": [
+            [
+                "bd28803fae776d32",
+                "3eadb19ce19c9081"
+            ]
+        ]
+    },
+    {
+        "id": "bd28803fae776d32",
+        "type": "function",
+        "z": "a0925a7f407eb939",
+        "name": "core",
+        "func": "// ==========================================\n// 0. SISTEMA SRE DE IDEMPOTÊNCIA (ANTI-DUPLICADOS)\n// ==========================================\n// Cria uma assinatura única para o e-mail\nconst emailSignature = msg.messageId || (msg.topic + \"_\" + msg.date);\n\n// Vai buscar a memória de e-mails já processados (Cache)\nlet processedEmails = flow.get(\"processedEmailsCache\") || [];\n\n// Se a assinatura já existir na memória, bloqueia e descarta!\nif (processedEmails.includes(emailSignature)) {\n    node.warn(\"🛡️ Intercetado: E-mail duplicado bloqueado pelo sistema (\" + msg.topic + \")\");\n    return [null, null]; // Interrompe o fluxo completamente\n}\n\n// Se for um e-mail novo, regista a assinatura na memória\nprocessedEmails.push(emailSignature);\nif (processedEmails.length > 50) {\n    processedEmails.shift(); // Remove os registos mais antigos para não sobrecarregar a memória RAM\n}\nflow.set(\"processedEmailsCache\", processedEmails);\n\n\n// ==========================================\n// 1. Captura e tratamento seguro dos dados brutos\n// ==========================================\n// ... (mantenha todo o seu código original a partir daqui)\nconst assunto = (msg.topic || \"\").toLowerCase();\nlet corpo = \"\";\n\n\ntry {\n    if (msg.payload) {\n        if (typeof msg.payload === 'string') {\n            corpo = msg.payload;\n        } else if (Buffer.isBuffer(msg.payload)) {\n            corpo = msg.payload.toString('utf8');\n        } else {\n            corpo = JSON.stringify(msg.payload);\n        }\n    }\n} catch (error) {\n    node.warn(\"Aviso: Falha ao extrair corpo do e-mail. Erro: \" + error.message);\n    corpo = \"\";\n}\n\n// Limpa o HTML para a busca\ncorpo = corpo.replace(/(<([^>]+)>)/gi, \" \").toLowerCase();\n\n// Pega o e-mail do remetente e deixa minúsculo para a Blacklist\nconst remetente = (msg.from || \"Desconhecido\").toLowerCase();\nconst data = new Date().toLocaleString('pt-BR');\n\n// ==========================================\n// NOVA ENGENHARIA DE FILTROS \n// ==========================================\n\n// 2. FILTRO NEGATIVO (A \"Blacklist\")\n// Mata o fluxo IMEDIATAMENTE se for marketing, newsletter ou alerta genérico\nconst keywordsIgnorar = [\"alerta de vaga\", \"vaga nova\", \"novas vagas\", \"newsletter\", \"dicas\", \"boas vindas\", \"bem-vindo\", \"promoção\", \"oferta\", \"natal\", \"black friday\"];\nconst remetentesIgnorar = [\"news@\", \"sucessodoaluno@\", \"listings@\", \"newsletter@\", \"relacionamento@\", \"read@\", \"itaucard@\", \"weekender@\", \"cruzeirodosulvirtual@\", \"noreply@\", \"hello@\", \"system@\", \"linkedin@\",\"dicas@\", \"marketing@\", \"info@\", \"contato@\", \"hello@sendgrid\"];\n\nconst isBlacklisted = \n    keywordsIgnorar.some(kw => assunto.includes(kw)) || \n    remetentesIgnorar.some(rem => remetente.includes(rem));\n\nif (isBlacklisted) {\n    // É lixo/marketing. Retorna nulo e encerra a execução deste e-mail.\n    return [null, null]; \n}\n\n// 3. FILTRO POSITIVO (A \"Whitelist\" Refinada)\n// Removemos a palavra \"vaga\" solta no corpo. Focamos em jargões de ATS e RH.\nconst keywordsVaga = [\n    \"candidatura\", \"candidatou-se\", \"processo seletivo\", \n    \"agradecemos seu interesse\", \"agradecemos sua candidatura\", \n    \"status da sua aplicação\", \"application status\", \"application received\"\n];\n\n// Regra de Ouro: Só aceitamos a palavra \"vaga\" se ela estiver no ASSUNTO. \n// Se estiver perdida no meio do corpo, ignoramos.\nconst isEmprego = keywordsVaga.some(kw => assunto.includes(kw) || corpo.includes(kw)) || assunto.includes(\"vaga\");\n\nif (isEmprego) {\n    let status = \"Neutro / Recebido\";\n    let tipoAlerta = \"info\";\n\n    const keywordsPositivo = [\"entrevista\", \"interview\", \"próxima etapa\", \"next steps\", \"convite\", \"proposta\", \"offer\", \"parabéns\", \"congratulations\", \"bate-papo\", \"bate papo\", \"avaliação\"];\n    const keywordsNegativo = [\"infelizmente\", \"unfortunately\", \"não seguiremos\", \"outros candidatos\", \"other candidates\", \"not selected\", \"not moving forward\"];\n\n    if (keywordsNegativo.some(kw => assunto.includes(kw) || corpo.includes(kw))) {\n        status = \"❌ Declinado\";\n        tipoAlerta = \"negativo\";\n    } else if (keywordsPositivo.some(kw => assunto.includes(kw) || corpo.includes(kw))) {\n        status = \"✅ Avanço / Entrevista!\";\n        tipoAlerta = \"positivo\";\n    }\n\n    const novaVaga = {\n        id: Date.now(),\n        dataOriginal: msg.date.toLocaleString('pt-BR'),\n        processadoEm: data,\n        remetente: msg.from.replace(/<.*>/, '').trim(), // Limpa o nome na hora de mostrar\n        assunto: msg.topic || \"Sem Assunto\",\n        status: status,\n        tipo: tipoAlerta\n    };\n\n    let historico = flow.get(\"historicoVagas\") || [];\n    historico.unshift(novaVaga);\n    if (historico.length > 50) { historico.pop(); }\n    flow.set(\"historicoVagas\", historico);\n\n    return [{ payload: historico }, { payload: novaVaga }, { payload: novaVaga }];\n}\n\n// Se não for e-mail de emprego, morre aqui\nreturn [null, null];",
+        "outputs": 3,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 430,
+        "y": 400,
+        "wires": [
+            [
+                "60ff8d0dd50cf536",
+                "c44f4a21f64eb78c"
+            ],
+            [
+                "97f13db40de6c102",
+                "a1a85680ab31c681"
+            ],
+            [
+                "06ee0abedc67e920",
+                "9ff0355d0e3fb0ea"
+            ]
+        ]
+    },
+    {
+        "id": "60ff8d0dd50cf536",
+        "type": "debug",
+        "z": "a0925a7f407eb939",
+        "name": "core dashboard",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 460,
+        "y": 460,
+        "wires": []
+    },
+    {
+        "id": "3eadb19ce19c9081",
+        "type": "debug",
+        "z": "a0925a7f407eb939",
+        "name": "email",
+        "active": false,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 150,
+        "y": 360,
+        "wires": []
+    },
+    {
+        "id": "c44f4a21f64eb78c",
+        "type": "ui-template",
+        "z": "a0925a7f407eb939",
+        "group": "c02cc997640c7f6e",
+        "page": "",
+        "ui": "",
+        "name": "dashboard",
+        "order": 1,
+        "width": 0,
+        "height": 0,
+        "head": "",
+        "format": "<div style=\"max-height: 500px; overflow-y: auto; padding: 10px;\">\n    <div v-for=\"item in msg.payload\" :key=\"item.id\" \n         style=\"padding: 12px; margin-bottom: 10px; border-radius: 8px; border-left: 6px solid #888; background: var(--v-theme-surface);\"\n         :style=\"{ borderLeftColor: item.tipo === 'positivo' ? '#4caf50' : (item.tipo === 'negativo' ? '#f44336' : '#2196f3') }\">\n        \n        <div style=\"display: flex; justify-content: space-between; margin-bottom: 5px;\">\n            <b style=\"font-size: 1.1em;\">{{ item.status }}</b>\n            <span style=\"font-size: 0.8em; color: gray;\">{{ item.data }}</span>\n        </div>\n        <div style=\"font-size: 0.9em; margin-bottom: 4px;\">\n            <b>De:</b> {{ item.remetente }}\n        </div>\n        <div style=\"font-size: 0.9em; color: #555;\">\n            {{ item.assunto }}\n        </div>\n    </div>\n    \n    <div v-if=\"!msg.payload || msg.payload.length === 0\" style=\"text-align: center; color: gray; margin-top: 20px;\">\n        Nenhuma devolutiva recebida ainda.\n    </div>\n</div>",
+        "storeOutMessages": true,
+        "passthru": true,
+        "resendOnRefresh": true,
+        "templateScope": "local",
+        "className": "",
+        "x": 690,
+        "y": 320,
+        "wires": [
+            []
+        ]
+    },
+    {
+        "id": "97f13db40de6c102",
+        "type": "debug",
+        "z": "a0925a7f407eb939",
+        "name": "core audio",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 450,
+        "y": 540,
+        "wires": []
+    },
+    {
+        "id": "998754b5f6e4459f",
+        "type": "exec",
+        "z": "a0925a7f407eb939",
+        "command": "",
+        "addpay": "payload",
+        "append": "",
+        "useSpawn": "false",
+        "timer": "",
+        "winHide": false,
+        "oldrc": false,
+        "name": "",
+        "x": 950,
+        "y": 400,
+        "wires": [
+            [
+                "a8fecbc028d4ec89"
+            ],
+            [
+                "b433ec12ef77013a"
+            ],
+            []
+        ]
+    },
+    {
+        "id": "a1a85680ab31c681",
+        "type": "function",
+        "z": "a0925a7f407eb939",
+        "name": "notificacao audio",
+        "func": "const vaga = msg.payload;\n\n// TRAVA DE SEGURANÇA: Se não for um objeto válido, morre aqui e não aciona o exec\nif (!vaga || !vaga.tipo) {\n    return null; \n}\n\nlet som = \"afplay /System/Library/Sounds/Glass.aiff\";\n\nif (vaga.tipo === \"positivo\") {\n    som = `afplay /System/Library/Sounds/Hero.aiff && say -v Luciana \"Atenção. Você recebeu um e-mail de entrevista de ${vaga.remetente}\"`;\n} \nelse if (vaga.tipo === \"negativo\") {\n    som = `afplay /System/Library/Sounds/Basso.aiff`;\n}\n\nmsg.payload = som;\nreturn msg;",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 710,
+        "y": 400,
+        "wires": [
+            [
+                "998754b5f6e4459f",
+                "354f9f717d7030c1"
+            ]
+        ]
+    },
+    {
+        "id": "354f9f717d7030c1",
+        "type": "debug",
+        "z": "a0925a7f407eb939",
+        "name": "notificacao audio",
+        "active": false,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 710,
+        "y": 440,
+        "wires": []
+    },
+    {
+        "id": "a8fecbc028d4ec89",
+        "type": "debug",
+        "z": "a0925a7f407eb939",
+        "name": "exec stdout",
+        "active": false,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 970,
+        "y": 460,
+        "wires": []
+    },
+    {
+        "id": "b433ec12ef77013a",
+        "type": "debug",
+        "z": "a0925a7f407eb939",
+        "name": "exec stderr",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 970,
+        "y": 500,
+        "wires": []
+    },
+    {
+        "id": "f8db08a6c150a58c",
+        "type": "telegram sender",
+        "z": "a0925a7f407eb939",
+        "name": "",
+        "bot": "3bcc73cc2626b622",
+        "haserroroutput": false,
+        "outputs": 1,
+        "x": 980,
+        "y": 560,
+        "wires": [
+            []
+        ]
+    },
+    {
+        "id": "6ed616db12da157d",
+        "type": "debug",
+        "z": "a0925a7f407eb939",
+        "name": "Telegram",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 680,
+        "y": 600,
+        "wires": []
+    },
+    {
+        "id": "06ee0abedc67e920",
+        "type": "function",
+        "z": "a0925a7f407eb939",
+        "name": "Mensagem Telegram",
+        "func": "const vaga = msg.payload;\n\n// Só manda para o Telegram se for um avanço/entrevista (evita flood no celular)\nif (vaga.tipo !== \"positivo\") {\n    return null;\n}\n\n// Formata a mensagem usando emojis e quebras de linha\nconst textoTelegram = `\n🎉 *Boas Notícias!*\nVocê tem uma atualização de processo seletivo.\n\n🏢 *De:* ${vaga.remetente}\n📌 *Assunto:* ${vaga.assunto}\n📆 *Data:* ${vaga.date}\n\nVá para o seu Dashboard ou cheque o e-mail para mais detalhes!\n`;\n\n// O nó do Telegram exige que a mensagem seja passada dentro de msg.payload.content\nmsg.payload = {\n    chatId: 6909201684,\n    type: \"message\",\n    content: textoTelegram,\n    options: { parse_mode: \"Markdown\" } // Permite usar negrito com asteriscos\n};\n\nreturn msg;",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 720,
+        "y": 560,
+        "wires": [
+            [
+                "f8db08a6c150a58c",
+                "6ed616db12da157d"
+            ]
+        ]
+    },
+    {
+        "id": "9ff0355d0e3fb0ea",
+        "type": "debug",
+        "z": "a0925a7f407eb939",
+        "name": "core telegram",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 460,
+        "y": 500,
+        "wires": []
+    },
+    {
+        "id": "3cd6218270218e84",
+        "type": "comment",
+        "z": "a0925a7f407eb939",
+        "name": "Fetching",
+        "info": "",
+        "x": 180,
+        "y": 320,
+        "wires": []
+    },
+    {
+        "id": "8ed33c01dadec3ed",
+        "type": "comment",
+        "z": "a0925a7f407eb939",
+        "name": "Core Function",
+        "info": "",
+        "x": 450,
+        "y": 340,
+        "wires": []
+    },
+    {
+        "id": "8581b4f155183668",
+        "type": "e-mail in",
+        "z": "a0925a7f407eb939",
+        "name": "rctsdev",
+        "protocol": "IMAP",
+        "server": "imap.gmail.com",
+        "useSSL": true,
+        "autotls": "always",
+        "port": "993",
+        "authtype": "BASIC",
+        "saslformat": true,
+        "token": "oauth2Response.access_token",
+        "box": "Inbox",
+        "disposition": "Read",
+        "criteria": "UNSEEN",
+        "repeat": "900",
+        "fetch": "auto",
+        "inputs": 0,
+        "x": 150,
+        "y": 460,
+        "wires": [
+            [
+                "bd28803fae776d32",
+                "728928f20b821fa7"
+            ]
+        ]
+    },
+    {
+        "id": "728928f20b821fa7",
+        "type": "debug",
+        "z": "a0925a7f407eb939",
+        "name": "email",
+        "active": false,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 150,
+        "y": 520,
+        "wires": []
+    },
+    {
+        "id": "c02cc997640c7f6e",
+        "type": "ui-group",
+        "name": "Ultimos Alertas",
+        "page": "9a2f7fb324dd1092",
+        "width": 6,
+        "height": 1,
+        "order": 1,
+        "showTitle": true,
+        "className": "",
+        "visible": "true",
+        "disabled": "false",
+        "groupType": "default"
+    },
+    {
+        "id": "3bcc73cc2626b622",
+        "type": "telegram bot",
+        "botname": "@MeuReporterbot",
+        "usernames": "",
+        "chatids": "",
+        "baseapiurl": "",
+        "testenvironment": false,
+        "updatemode": "polling",
+        "pollinterval": "300",
+        "usesocks": false,
+        "sockshost": "",
+        "socksprotocol": "socks5",
+        "socksport": 6667,
+        "socksusername": "anonymous",
+        "sockspassword": "",
+        "bothost": "",
+        "botpath": "",
+        "localbothost": "0.0.0.0",
+        "localbotport": 8443,
+        "publicbotport": 8443,
+        "privatekey": "",
+        "certificate": "",
+        "useselfsignedcertificate": false,
+        "sslterminated": false,
+        "verboselogging": false
+    },
+    {
+        "id": "9a2f7fb324dd1092",
+        "type": "ui-page",
+        "name": "Monitoramento",
+        "ui": "5688585864594044",
+        "path": "/page1",
+        "icon": "home",
+        "layout": "grid",
+        "theme": "7ea66ce5d91f48d8",
+        "breakpoints": [
+            {
+                "name": "Default",
+                "px": "0",
+                "cols": "3"
+            },
+            {
+                "name": "Tablet",
+                "px": "576",
+                "cols": "6"
+            },
+            {
+                "name": "Small Desktop",
+                "px": "768",
+                "cols": "9"
+            },
+            {
+                "name": "Desktop",
+                "px": "1024",
+                "cols": "12"
+            }
+        ],
+        "order": 1,
+        "className": "",
+        "visible": "true",
+        "disabled": "false"
+    },
+    {
+        "id": "5688585864594044",
+        "type": "ui-base",
+        "name": "My Dashboard",
+        "path": "/dashboard",
+        "appIcon": "",
+        "includeClientData": true,
+        "acceptsClientConfig": [
+            "ui-notification",
+            "ui-control"
+        ],
+        "showPathInSidebar": false,
+        "headerContent": "page",
+        "navigationStyle": "default",
+        "titleBarStyle": "default",
+        "showReconnectNotification": true,
+        "notificationDisplayTime": 1,
+        "showDisconnectNotification": true,
+        "allowInstall": false
+    },
+    {
+        "id": "7ea66ce5d91f48d8",
+        "type": "ui-theme",
+        "name": "Default Theme",
+        "colors": {
+            "surface": "#ffffff",
+            "primary": "#0094CE",
+            "bgPage": "#eeeeee",
+            "groupBg": "#ffffff",
+            "groupOutline": "#cccccc"
+        },
+        "sizes": {
+            "density": "default",
+            "pagePadding": "12px",
+            "groupGap": "12px",
+            "groupBorderRadius": "4px",
+            "widgetGap": "12px"
+        }
+    },
+    {
+        "id": "4f9e9db4572a8569",
+        "type": "global-config",
+        "env": [],
+        "modules": {
+            "node-red-node-email": "5.2.1",
+            "@flowfuse/node-red-dashboard": "1.30.2",
+            "node-red-contrib-telegrambot": "17.1.0"
+        }
+    }
+]
