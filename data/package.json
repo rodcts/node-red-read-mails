@@ -1,0 +1,14 @@
+{
+    "name": "mails-automation",
+    "version": "1.0.0",
+    "dependencies": {
+        "@flowfuse/node-red-dashboard": "~1.30.2",
+        "node-red-contrib-gemini": "~1.0.3",
+        "node-red-contrib-google-sheets": "~1.1.2",
+        "node-red-contrib-google-sheets-advance": "~1.0.0",
+        "node-red-contrib-telegrambot": "~17.1.0",
+        "node-red-node-email": "~5.2.1",
+        "node-red-node-feedparser": "~1.0.3",
+        "nodered-contrib-google-sheets-to-json-stream": "~1.0.4"
+    }
+}

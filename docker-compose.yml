@@ -1,0 +1,23 @@
+services:
+  node-red:
+    build: . # Ele vai buildar sua imagem customizada
+    image: mails-automation:latest
+    container_name: node-red-mails
+    restart: always
+    ports:
+      - "1881:1880"
+    environment:
+      - TZ=America/Sao_Paulo
+    volumes:
+      # Volume apenas para dados que mudam em runtime (logs, contexto)
+      # e para injetar o segredo do Google que não deve ir pro Git
+      - node_red_data:/data
+    networks:
+      - media-net
+
+volumes:
+  node_red_data:
+
+networks:
+  media-net:
+    driver: bridge
